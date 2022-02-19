@@ -21,12 +21,24 @@ import visdom
 
 def extract_cnn_feature(model, inputs, output_feature=None):
     model.eval()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     inputs = to_torch(inputs)
-    inputs = inputs.to(device)
-    outputs = model(inputs, output_feature)
-    outputs = outputs.data.cpu()
-    return outputs
+    inputs = Variable(inputs.cuda(), volatile=True)
+    if modules is None:
+        output_maps, outputs = model(inputs)
+        outputs = outputs.data.cpu()
+        output_maps = output_maps.data.cpu()
+        return outputs, output_maps
+    # Register forward hook for each module
+    outputs = OrderedDict()
+    handles = []
+    for m in modules:
+        outputs[id(m)] = None
+        def func(m, i, o): outputs[id(m)] = o.data.cpu()
+        handles.append(m.register_forward_hook(func))
+    model(inputs)
+    for h in handles:
+        h.remove()
+    return list(outputs.values())
 
 
 def extract_features(model, data_loader, print_freq=1, output_feature=None):
@@ -60,7 +72,16 @@ def extract_features(model, data_loader, print_freq=1, output_feature=None):
     return features, labels
 
 
-def pairwise_distance(query_features, gallery_features, query=None, gallery=None):
+def pairwise_distance(query_features, gallery_features, query=None, gallery=None, metric=None):
+    if query is None and gallery is None:
+        n = len(features)
+        x = torch.cat(list(features.values()))
+        x = x.view(n, -1)
+        if metric is not None:
+            x = metric.transform(x)
+        dist = torch.pow(x, 2).sum(dim=1, keepdim=True) * 2
+        dist = dist.expand(n, n) - 2 * torch.mm(x, x.t())
+        return dist
     x = torch.cat([query_features[f].unsqueeze(0) for f, _, _ in query], 0)
     y = torch.cat([gallery_features[f].unsqueeze(0) for f, _, _ in gallery], 0)
 
@@ -98,35 +119,13 @@ def evaluate_all(distmat, query=None, gallery=None,
               .format(k, all_cmc[k - 1]))
     return
 
-    # Traditional evaluation
-    # Compute mean AP
-    # mAP = mean_ap(distmat, query_ids, gallery_ids, query_cams, gallery_cams)
-    # print('Mean AP: {:4.1%}'.format(mAP))
-    #
-    # # Compute CMC scores
-    # cmc_configs = {
-    #     'market1501': dict(separate_camera_set=False,
-    #                        single_gallery_shot=False,
-    #                        first_match_break=True)}
-    # cmc_scores = {name: cmc(distmat, query_ids, gallery_ids,
-    #                         query_cams, gallery_cams, **params)
-    #               for name, params in cmc_configs.items()}
-    #
-    # print('CMC Scores')
-    # for k in cmc_topk:
-    #     print('  top-{:<4}{:12.1%}'
-    #           .format(k, cmc_scores['market1501'][k - 1]))
-    #
-    # return cmc_scores['market1501'][0]
-
-
 class Evaluator(object):
     def __init__(self, model):
         super(Evaluator, self).__init__()
         self.model = model
 
-    def evaluate(self, query_loader, gallery_loader, query, gallery, output_feature=None):
+    def evaluate(self, query_loader, gallery_loader, query, gallery, output_feature=None, metric=None):
         query_features, _ = extract_features(self.model, query_loader, 1, output_feature)
         gallery_features, _ = extract_features(self.model, gallery_loader, 1, output_feature)
-        distmat = pairwise_distance(query_features, gallery_features, query, gallery)
+        distmat = pairwise_distance(query_features, gallery_features, query, gallery, metric=metric)
         return evaluate_all(distmat, query=query, gallery=gallery)
