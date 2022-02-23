@@ -2,7 +2,7 @@ from __future__ import absolute_import
 from collections import defaultdict
 
 import numpy as np
-from sklearn.metrics.base import _average_binary_score
+from sklearn.metrics._base import _average_binary_score
 from sklearn.metrics import precision_recall_curve, auc
 # from sklearn.metrics import average_precision_score
 
